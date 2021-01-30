@@ -20,7 +20,6 @@ fn main() {
     let cflags = String::from_utf8(cflags_bytes).unwrap();
 
     let mut header_locations = vec![];
-
     for flag in cflags.split(' ') {
         if flag.starts_with("-I") {
             let header_location = flag[2..].trim();
@@ -28,9 +27,11 @@ fn main() {
         }
     }
 
+    // Instruct pkg-config that we want to *statically* link DPDK. We will still have dynamic
+    // dependencies on `libmlx5`, `libibverbs`, and `libnl`, though.
     let ldflags_bytes = Command::new("pkg-config")
         .env("PKG_CONFIG_PATH", &pkg_config_path)
-        .args(&["--libs", "libdpdk"])
+        .args(&["--libs", "--static", "libdpdk"])
         .output()
         .unwrap_or_else(|e| panic!("Failed pkg-config ldflags: {:?}",e ))
         .stdout;
@@ -38,24 +39,30 @@ fn main() {
 
     let mut library_location = None;
     let mut lib_names = vec![];
-
+    let mut static_lib_names = vec![];
     for flag in ldflags.split(' ') {
         if flag.starts_with("-L") {
+            assert_eq!(library_location, None);
             library_location = Some(&flag[2..]);
+        } else if flag.starts_with("-l:lib") && flag.ends_with(".a") {
+            static_lib_names.push(&flag[6..flag.len()-2]);
         } else if flag.starts_with("-l") {
             lib_names.push(&flag[2..]);
         }
     }
 
-    // Link in `librte_net_mlx5` and its dependencies if desired. 
+    // Link in `librte_net_mlx5` and its dependencies if desired.
     #[cfg(feature = "mlx5")] {
-        lib_names.extend(&["rte_net_mlx5", "rte_bus_pci", "rte_bus_vdev", "rte_common_mlx5"]);
+        static_lib_names.extend(&["rte_net_mlx5", "rte_bus_pci", "rte_bus_vdev", "rte_common_mlx5"]);
     }
 
     // Step 1: Now that we've compiled and installed DPDK, point cargo to the libraries.
     println!("cargo:rustc-link-search=native={}", library_location.unwrap());
     for lib_name in &lib_names {
         println!("cargo:rustc-link-lib={}", lib_name);
+    }
+    for lib_name in &static_lib_names {
+        println!("cargo:rustc-link-lib=static={}", lib_name);
     }
 
     // Step 2: Generate bindings for the DPDK headers.
@@ -74,8 +81,8 @@ fn main() {
     let bindings_out = out_dir.join("bindings.rs");
     bindings.write_to_file(bindings_out).expect("Failed to write bindings");
 
-    // Step 3: Compile a stub file so Rust can access `inline` functions in the headers 
-    // that aren't compiled into the libraries. 
+    // Step 3: Compile a stub file so Rust can access `inline` functions in the headers
+    // that aren't compiled into the libraries.
     let mut builder = cc::Build::new();
     builder.opt_level(3);
     builder.pic(true);

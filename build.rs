@@ -37,33 +37,40 @@ fn main() {
         .stdout;
     let ldflags = String::from_utf8(ldflags_bytes).unwrap();
 
-    let mut library_location = None;
-    let mut lib_names = vec![];
-    let mut static_lib_names = vec![];
+    // Step 1: Point Cargo to DPDK's libraries for linkage.
+    // Cargo has linkage in "--as-needed" mode by default, which doesn't match up with DPDK's 
+    // expectations: We need to include library dependencies without symbol dependencies since the
+    // driver libraries rely on constructors to register themselves at runtime.
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
     for flag in ldflags.split(' ') {
         if flag.starts_with("-L") {
-            assert_eq!(library_location, None);
-            library_location = Some(&flag[2..]);
+            let library_location = &flag[2..];
+            println!("cargo:rustc-link-search=native={}", library_location);
         } else if flag.starts_with("-l:lib") && flag.ends_with(".a") {
-            static_lib_names.push(&flag[6..flag.len()-2]);
+            let static_lib_name = &flag[6..flag.len()-2];
+            println!("cargo:rustc-link-lib=static={}", static_lib_name);
         } else if flag.starts_with("-l") {
-            lib_names.push(&flag[2..]);
+            let lib_name = &flag[2..];
+            println!("cargo:rustc-link-lib={}", lib_name);
+        } else if flag.starts_with("-Wl,") {
+            println!("cargo:rustc-link-arg={}", flag);
+        } else if flag == "-pthread" {
+            continue;
+        } else {
+            panic!("Unrecognized build flag: {}", flag);
         }
     }
 
     // Link in `librte_net_mlx5` and its dependencies if desired.
     #[cfg(feature = "mlx5")] {
-        static_lib_names.extend(&["rte_net_mlx5", "rte_bus_pci", "rte_bus_vdev", "rte_common_mlx5"]);
+        println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
+        for static_lib_name in &["rte_net_mlx5", "rte_bus_pci", "rte_bus_vdev", "rte_common_mlx5"] {
+            println!("cargo:rustc-link-lib=static={}", static_lib_name);
+        }
     }
 
-    // Step 1: Now that we've compiled and installed DPDK, point cargo to the libraries.
-    println!("cargo:rustc-link-search=native={}", library_location.unwrap());
-    for lib_name in &lib_names {
-        println!("cargo:rustc-link-lib={}", lib_name);
-    }
-    for lib_name in &static_lib_names {
-        println!("cargo:rustc-link-lib=static={}", lib_name);
-    }
+    // Reinstate Cargo's "environment"
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
 
     // Step 2: Generate bindings for the DPDK headers.
     let mut builder = Builder::default();
